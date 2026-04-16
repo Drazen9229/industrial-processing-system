@@ -7,6 +7,8 @@ namespace IndustrialProcessingSystem.Services;
 
 public class ProcessingSystem
 {
+    private const int MaxAttempts = 3;
+    private static readonly TimeSpan JobTimeout = TimeSpan.FromSeconds(2);
     private readonly int _workerCount;
     private readonly int _maxQueueSize;
     private readonly List<QueuedJob> _queuedJobs = [];
@@ -184,26 +186,67 @@ public class ProcessingSystem
         }
     }
 
-    private async Task<int> ExecuteJobAsync(Job job)
+    private async Task<int> ExecuteJobAsync(Job job, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(job);
 
         return job.Type switch
         {
-            JobType.IO => await ExecuteIoJobAsync(job.Payload),
-            JobType.Prime => ExecutePrimeJob(job.Payload),
+            JobType.IO => await ExecuteIoJobAsync(job.Payload, cancellationToken),
+            JobType.Prime => ExecutePrimeJob(job.Payload, cancellationToken),
             _ => throw new InvalidOperationException($"Unsupported job type: {job.Type}.")
         };
     }
 
-    private static int ExecutePrimeJob(string payload)
+    private async Task<int> ExecuteJobWithTimeoutAsync(Job job)
     {
+        using var timeoutCts = new CancellationTokenSource(JobTimeout);
+        try
+        {
+            return await ExecuteJobAsync(job, timeoutCts.Token);
+        }
+        catch (OperationCanceledException ex) when (timeoutCts.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Job '{job.Id}' exceeded timeout of {JobTimeout.TotalSeconds} seconds.",
+                ex);
+        }
+    }
+
+    private async Task<int> ExecuteWithRetryAsync(Job job)
+    {
+        Exception? lastException = null;
+
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            try
+            {
+                return await ExecuteJobWithTimeoutAsync(job);
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+
+                if (attempt == MaxAttempts)
+                {
+                    throw;
+                }
+            }
+        }
+
+        throw lastException ?? new InvalidOperationException("Job execution failed.");
+    }
+
+    private static int ExecutePrimeJob(string payload, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         var (numbers, threads) = ParsePrimePayload(payload);
         _ = threads; // TODO: Use threads to parallelize prime execution in a future step.
 
         var primeCount = 0;
         for (var value = 2; value <= numbers; value++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (IsPrime(value))
             {
                 primeCount++;
@@ -307,10 +350,10 @@ public class ProcessingSystem
         return true;
     }
 
-    private static async Task<int> ExecuteIoJobAsync(string payload)
+    private static async Task<int> ExecuteIoJobAsync(string payload, CancellationToken cancellationToken)
     {
         var delayMilliseconds = ParseDelayMilliseconds(payload);
-        await Task.Delay(delayMilliseconds);
+        await Task.Delay(delayMilliseconds, cancellationToken);
         return delayMilliseconds;
     }
 
@@ -358,7 +401,7 @@ public class ProcessingSystem
 
             try
             {
-                var result = await ExecuteJobAsync(queuedJob.Job);
+                var result = await ExecuteWithRetryAsync(queuedJob.Job);
                 queuedJob.CompletionSource.TrySetResult(result);
                 OnJobCompleted(queuedJob.Job, result);
             }
@@ -378,7 +421,7 @@ public class ProcessingSystem
         }
         catch
         {
-            // Intentionally swallow subscriber exceptions to keep workers running.
+            //intentionally swallow exceptions to keep workers running.
         }
     }
 
@@ -390,7 +433,7 @@ public class ProcessingSystem
         }
         catch
         {
-            // Intentionally swallow subscriber exceptions to keep workers running.
+            //intentionally swallow exceptions to keep workers running.
         }
     }
 

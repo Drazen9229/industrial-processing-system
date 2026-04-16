@@ -26,6 +26,7 @@ public class ProcessingSystem
 
     public event Action<Job, int>? JobCompleted;
     public event Action<Job, Exception>? JobFailed;
+    public event Action<Job, Exception>? JobAborted;
 
     public ProcessingSystem(SystemConfig config)
     {
@@ -309,8 +310,9 @@ public class ProcessingSystem
         }
     }
 
-    private async Task<int> ExecuteWithRetryAsync(Job job)
+    private async Task<int> ExecuteWithRetryAsync(Job job, Action<int, Exception, bool> onAttemptFailed)
     {
+        ArgumentNullException.ThrowIfNull(onAttemptFailed);
         Exception? lastException = null;
 
         for (var attempt = 1; attempt <= MaxAttempts; attempt++)
@@ -322,8 +324,10 @@ public class ProcessingSystem
             catch (Exception ex)
             {
                 lastException = ex;
+                var isFinalAttempt = attempt == MaxAttempts;
+                onAttemptFailed(attempt, ex, isFinalAttempt);
 
-                if (attempt == MaxAttempts)
+                if (isFinalAttempt)
                 {
                     throw;
                 }
@@ -550,7 +554,9 @@ public class ProcessingSystem
             var stopwatch = Stopwatch.StartNew();
             try
             {
-                var result = await ExecuteWithRetryAsync(queuedJob.Job);
+                var result = await ExecuteWithRetryAsync(
+                    queuedJob.Job,
+                    (attempt, ex, isFinalAttempt) => OnJobAttemptFailed(queuedJob.Job, attempt, ex, isFinalAttempt));
                 RecordCompletedJob(queuedJob.Job, result, stopwatch.ElapsedMilliseconds);
                 queuedJob.CompletionSource.TrySetResult(result);
                 OnJobCompleted(queuedJob.Job, result);
@@ -559,7 +565,6 @@ public class ProcessingSystem
             {
                 RecordFailedJob(queuedJob.Job, ex.Message, stopwatch.ElapsedMilliseconds);
                 queuedJob.CompletionSource.TrySetException(ex);
-                OnJobFailed(queuedJob.Job, ex);
             }
         }
     }
@@ -597,6 +602,30 @@ public class ProcessingSystem
         try
         {
             JobFailed?.Invoke(job, ex);
+        }
+        catch
+        {
+            //intentionally swallow exceptions to keep workers running.
+        }
+    }
+
+    private void OnJobAttemptFailed(Job job, int attempt, Exception ex, bool isFinalAttempt)
+    {
+        _ = attempt;
+        if (isFinalAttempt && ex is TimeoutException)
+        {
+            OnJobAborted(job, ex);
+            return;
+        }
+
+        OnJobFailed(job, ex);
+    }
+
+    private void OnJobAborted(Job job, Exception ex)
+    {
+        try
+        {
+            JobAborted?.Invoke(job, ex);
         }
         catch
         {

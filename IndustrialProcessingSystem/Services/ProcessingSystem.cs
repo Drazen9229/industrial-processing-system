@@ -10,6 +10,7 @@ public class ProcessingSystem
     private readonly int _workerCount;
     private readonly int _maxQueueSize;
     private readonly List<QueuedJob> _queuedJobs = [];
+    private readonly HashSet<Guid> _acceptedJobIds = [];
     private readonly List<Task> _workers = [];
     private readonly object _queueLock = new();
     private readonly object _startLock = new();
@@ -51,6 +52,12 @@ public class ProcessingSystem
             foreach (var job in config.InitialJobs)
             {
                 ValidateJob(job);
+
+                if (!_acceptedJobIds.Add(job.Id))
+                {
+                    throw new InvalidOperationException($"Duplicate job Id '{job.Id}' detected in InitialJobs.");
+                }
+
                 var queuedJob = new QueuedJob(
                     job,
                     new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously));
@@ -95,16 +102,23 @@ public class ProcessingSystem
     {
         ValidateJob(job);
 
-        var queuedJob = new QueuedJob(
-            job,
-            new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously));
+        QueuedJob queuedJob;
         lock (_queueLock)
         {
+            if (_acceptedJobIds.Contains(job.Id))
+            {
+                throw new InvalidOperationException($"Job with Id '{job.Id}' has already been accepted.");
+            }
+
             if (_queuedJobs.Count >= _maxQueueSize)
             {
                 throw new InvalidOperationException("Queue is full. Cannot accept new jobs.");
             }
 
+            _acceptedJobIds.Add(job.Id);
+            queuedJob = new QueuedJob(
+                job,
+                new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously));
             EnqueueByPriority(queuedJob);
             _queueSignal.Release();
         }

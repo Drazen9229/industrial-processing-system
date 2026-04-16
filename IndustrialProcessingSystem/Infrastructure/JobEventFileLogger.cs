@@ -34,20 +34,28 @@ public class JobEventFileLogger
 
     private void OnJobCompleted(Job job, int result)
     {
-        var line = $"{DateTimeOffset.UtcNow:O} | COMPLETED | JobId={job.Id} | Type={job.Type} | Result={result}";
+        var line = FormatLogLine("COMPLETED", job.Id, result.ToString());
         _ = AppendLineSafeAsync(line);
     }
 
     private void OnJobFailed(Job job, Exception ex)
     {
-        var line = $"{DateTimeOffset.UtcNow:O} | FAILED | JobId={job.Id} | Type={job.Type} | Error={ex.Message}";
+        var line = FormatLogLine("FAILED", job.Id, ex.Message);
         _ = AppendLineSafeAsync(line);
     }
 
     private void OnJobAborted(Job job, Exception ex)
     {
-        var line = $"{DateTimeOffset.UtcNow:O} | ABORTED | JobId={job.Id} | Type={job.Type} | Error={ex.Message}";
+        var line = FormatLogLine("ABORT", job.Id, ex.Message);
         _ = AppendLineSafeAsync(line);
+    }
+
+    private static string FormatLogLine(string status, Guid jobId, string value)
+    {
+        var normalizedValue = string.IsNullOrWhiteSpace(value)
+            ? "N/A"
+            : value.Replace("\r", " ").Replace("\n", " ");
+        return $"[{DateTimeOffset.UtcNow:O}] [{status}] {jobId}, {normalizedValue}";
     }
 
     private async Task AppendLineSafeAsync(string line)

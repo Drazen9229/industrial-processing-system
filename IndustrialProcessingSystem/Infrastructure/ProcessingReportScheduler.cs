@@ -8,6 +8,7 @@ public class ProcessingReportScheduler
     private readonly ProcessingSystem _processingSystem;
     private readonly string _reportsDirectory;
     private readonly TimeSpan _interval;
+    private long _nextReportSlot;
     private int _started;
 
     public ProcessingReportScheduler(ProcessingSystem processingSystem, string reportsDirectory, TimeSpan interval)
@@ -29,6 +30,7 @@ public class ProcessingReportScheduler
         _interval = interval;
 
         Directory.CreateDirectory(_reportsDirectory);
+        _nextReportSlot = ResolveInitialReportSlot();
     }
 
     public void Start()
@@ -54,13 +56,13 @@ public class ProcessingReportScheduler
                 }
                 catch
                 {
-                    // Intentionally swallow scheduler/report failures for now.
+                    //intentionally swallow report failures
                 }
             }
         }
         catch
         {
-            // Intentionally swallow scheduler loop failures for now.
+            //intentionally swallow scheduler loop failures
         }
     }
 
@@ -68,25 +70,58 @@ public class ProcessingReportScheduler
     {
         Directory.CreateDirectory(_reportsDirectory);
 
-        var reportFileName = $"report-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.xml";
+        var slot = (int)((Interlocked.Increment(ref _nextReportSlot) - 1) % MaxReportFilesToKeep);
+        if (slot < 0)
+        {
+            slot += MaxReportFilesToKeep;
+        }
+
+        var reportFileName = $"report-{slot}.xml";
         var reportFilePath = Path.Combine(_reportsDirectory, reportFileName);
         _processingSystem.GenerateXmlReport(reportFilePath);
+    }
 
-        var reportFiles = Directory
-            .GetFiles(_reportsDirectory, "report-20*.xml")
-            .OrderByDescending(path => Path.GetFileName(path), StringComparer.Ordinal)
-            .ToList();
+    private long ResolveInitialReportSlot()
+    {
+        var knownSlots = new Dictionary<int, DateTime>();
 
-        foreach (var oldFile in reportFiles.Skip(MaxReportFilesToKeep))
+        foreach (var path in Directory.GetFiles(_reportsDirectory, "report-*.xml"))
         {
-            try
+            var fileName = Path.GetFileNameWithoutExtension(path);
+            if (!fileName.StartsWith("report-", StringComparison.Ordinal))
             {
-                File.Delete(oldFile);
+                continue;
             }
-            catch
+
+            var slotText = fileName["report-".Length..];
+            if (!int.TryParse(slotText, out var slot))
             {
-                // Intentionally swallow cleanup failures for now.
+                continue;
+            }
+
+            if (slot < 0 || slot >= MaxReportFilesToKeep)
+            {
+                continue;
+            }
+
+            knownSlots[slot] = File.GetLastWriteTimeUtc(path);
+        }
+
+        if (knownSlots.Count < MaxReportFilesToKeep)
+        {
+            for (var slot = 0; slot < MaxReportFilesToKeep; slot++)
+            {
+                if (!knownSlots.ContainsKey(slot))
+                {
+                    return slot;
+                }
             }
         }
+
+        return knownSlots
+            .OrderBy(entry => entry.Value)
+            .ThenBy(entry => entry.Key)
+            .First()
+            .Key;
     }
 }

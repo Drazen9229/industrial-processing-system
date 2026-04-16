@@ -14,6 +14,9 @@ public class ProcessingSystem
     private readonly object _queueLock = new();
     private readonly SemaphoreSlim _queueSignal;
 
+    public event Action<Job, int>? JobCompleted;
+    public event Action<Job, Exception>? JobFailed;
+
     public ProcessingSystem(SystemConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -138,7 +141,6 @@ public class ProcessingSystem
         }
     }
 
-    // Will be used by worker loops once execution is implemented.
     private bool TryDequeueNext(out QueuedJob? queuedJob)
     {
         lock (_queueLock)
@@ -162,9 +164,120 @@ public class ProcessingSystem
         return job.Type switch
         {
             JobType.IO => await ExecuteIoJobAsync(job.Payload),
-            JobType.Prime => throw new NotSupportedException("Prime job execution is not implemented yet."),
+            JobType.Prime => ExecutePrimeJob(job.Payload),
             _ => throw new InvalidOperationException($"Unsupported job type: {job.Type}.")
         };
+    }
+
+    private static int ExecutePrimeJob(string payload)
+    {
+        var (numbers, threads) = ParsePrimePayload(payload);
+        _ = threads; // TODO: Use threads to parallelize prime execution in a future step.
+
+        var primeCount = 0;
+        for (var value = 2; value <= numbers; value++)
+        {
+            if (IsPrime(value))
+            {
+                primeCount++;
+            }
+        }
+
+        return primeCount;
+    }
+
+    private static (int Numbers, int Threads) ParsePrimePayload(string payload)
+    {
+        const string invalidPayloadMessage = "Prime payload is invalid. Expected format: numbers:<value>,threads:<value> with numbers > 1 and threads > 0.";
+
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            throw new InvalidOperationException(invalidPayloadMessage);
+        }
+
+        var segments = payload.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length != 2)
+        {
+            throw new InvalidOperationException(invalidPayloadMessage);
+        }
+
+        int? numbers = null;
+        int? threads = null;
+
+        foreach (var segment in segments)
+        {
+            var keyValue = segment.Split(':', 2, StringSplitOptions.TrimEntries);
+            if (keyValue.Length != 2 || keyValue[1].Length == 0)
+            {
+                throw new InvalidOperationException(invalidPayloadMessage);
+            }
+
+            var valueText = keyValue[1].Replace("_", string.Empty, StringComparison.Ordinal);
+            if (!int.TryParse(valueText, NumberStyles.None, CultureInfo.InvariantCulture, out var value))
+            {
+                throw new InvalidOperationException(invalidPayloadMessage);
+            }
+
+            if (keyValue[0].Equals("numbers", StringComparison.OrdinalIgnoreCase))
+            {
+                if (numbers.HasValue)
+                {
+                    throw new InvalidOperationException(invalidPayloadMessage);
+                }
+
+                numbers = value;
+                continue;
+            }
+
+            if (keyValue[0].Equals("threads", StringComparison.OrdinalIgnoreCase))
+            {
+                if (threads.HasValue)
+                {
+                    throw new InvalidOperationException(invalidPayloadMessage);
+                }
+
+                threads = value;
+                continue;
+            }
+
+            throw new InvalidOperationException(invalidPayloadMessage);
+        }
+
+        if (!numbers.HasValue || !threads.HasValue || numbers.Value <= 1 || threads.Value <= 0)
+        {
+            throw new InvalidOperationException(invalidPayloadMessage);
+        }
+
+        return (numbers.Value, threads.Value);
+    }
+
+    private static bool IsPrime(int value)
+    {
+        if (value < 2)
+        {
+            return false;
+        }
+
+        if (value == 2)
+        {
+            return true;
+        }
+
+        if (value % 2 == 0)
+        {
+            return false;
+        }
+
+        var limit = (int)Math.Sqrt(value);
+        for (var divisor = 3; divisor <= limit; divisor += 2)
+        {
+            if (value % divisor == 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static async Task<int> ExecuteIoJobAsync(string payload)
@@ -219,12 +332,38 @@ public class ProcessingSystem
             try
             {
                 var result = await ExecuteJobAsync(queuedJob.Job);
-                queuedJob.CompletionSource.SetResult(result);
+                queuedJob.CompletionSource.TrySetResult(result);
+                OnJobCompleted(queuedJob.Job, result);
             }
             catch (Exception ex)
             {
-                queuedJob.CompletionSource.SetException(ex);
+                queuedJob.CompletionSource.TrySetException(ex);
+                OnJobFailed(queuedJob.Job, ex);
             }
+        }
+    }
+
+    private void OnJobCompleted(Job job, int result)
+    {
+        try
+        {
+            JobCompleted?.Invoke(job, result);
+        }
+        catch
+        {
+            // Intentionally swallow subscriber exceptions to keep workers running.
+        }
+    }
+
+    private void OnJobFailed(Job job, Exception ex)
+    {
+        try
+        {
+            JobFailed?.Invoke(job, ex);
+        }
+        catch
+        {
+            // Intentionally swallow subscriber exceptions to keep workers running.
         }
     }
 

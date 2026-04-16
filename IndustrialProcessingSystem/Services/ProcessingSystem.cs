@@ -15,6 +15,7 @@ public class ProcessingSystem
     private readonly int _maxQueueSize;
     private readonly List<QueuedJob> _queuedJobs = [];
     private readonly HashSet<Guid> _acceptedJobIds = [];
+    private readonly Dictionary<Guid, Job> _jobRegistry = [];
     private readonly List<Task> _workers = [];
     private readonly object _queueLock = new();
     private readonly object _startLock = new();
@@ -65,6 +66,7 @@ public class ProcessingSystem
                     throw new InvalidOperationException($"Duplicate job Id '{job.Id}' detected in InitialJobs.");
                 }
 
+                _jobRegistry[job.Id] = job;
                 var queuedJob = new QueuedJob(
                     job,
                     new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously));
@@ -112,7 +114,7 @@ public class ProcessingSystem
         QueuedJob queuedJob;
         lock (_queueLock)
         {
-            if (_acceptedJobIds.Contains(job.Id))
+            if (!_acceptedJobIds.Add(job.Id))
             {
                 throw new InvalidOperationException($"Job with Id '{job.Id}' has already been accepted.");
             }
@@ -122,7 +124,7 @@ public class ProcessingSystem
                 throw new InvalidOperationException("Queue is full. Cannot accept new jobs.");
             }
 
-            _acceptedJobIds.Add(job.Id);
+            _jobRegistry[job.Id] = job;
             queuedJob = new QueuedJob(
                 job,
                 new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously));
@@ -135,6 +137,40 @@ public class ProcessingSystem
             Id = job.Id,
             Result = queuedJob.CompletionSource.Task
         };
+    }
+
+    public IEnumerable<Job> GetTopJobs(int n)
+    {
+        if (n <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(n), "n must be greater than 0.");
+        }
+
+        lock (_queueLock)
+        {
+            return _queuedJobs
+                .Take(n)
+                .Select(queuedJob => queuedJob.Job)
+                .ToArray();
+        }
+    }
+
+    public Job GetJob(Guid id)
+    {
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Job Id must not be empty.", nameof(id));
+        }
+
+        lock (_queueLock)
+        {
+            if (_jobRegistry.TryGetValue(id, out var job))
+            {
+                return job;
+            }
+        }
+
+        throw new InvalidOperationException($"Job with Id '{id}' was not found.");
     }
 
     public void GenerateXmlReport(string filePath)

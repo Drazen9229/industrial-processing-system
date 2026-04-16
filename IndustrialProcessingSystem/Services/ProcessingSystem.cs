@@ -1,3 +1,4 @@
+using System.Globalization;
 using IndustrialProcessingSystem.Configuration;
 using IndustrialProcessingSystem.Enums;
 using IndustrialProcessingSystem.Models;
@@ -9,6 +10,7 @@ public class ProcessingSystem
     private readonly int _workerCount;
     private readonly int _maxQueueSize;
     private readonly List<QueuedJob> _queuedJobs = [];
+    private readonly List<Task> _workers = [];
     private readonly object _queueLock = new();
     private readonly SemaphoreSlim _queueSignal;
 
@@ -53,6 +55,10 @@ public class ProcessingSystem
         }
 
         _queueSignal = new SemaphoreSlim(_queuedJobs.Count, int.MaxValue);
+        for (var i = 0; i < _workerCount; i++)
+        {
+            _workers.Add(Task.Run(WorkerLoopAsync));
+        }
     }
 
     public int WorkerCount => _workerCount;
@@ -87,7 +93,6 @@ public class ProcessingSystem
             _queueSignal.Release();
         }
 
-        // TODO: Complete this task when worker execution is implemented.
         return new JobHandle
         {
             Id = job.Id,
@@ -147,6 +152,79 @@ public class ProcessingSystem
             queuedJob = _queuedJobs[0];
             _queuedJobs.RemoveAt(0);
             return true;
+        }
+    }
+
+    private async Task<int> ExecuteJobAsync(Job job)
+    {
+        ArgumentNullException.ThrowIfNull(job);
+
+        return job.Type switch
+        {
+            JobType.IO => await ExecuteIoJobAsync(job.Payload),
+            JobType.Prime => throw new NotSupportedException("Prime job execution is not implemented yet."),
+            _ => throw new InvalidOperationException($"Unsupported job type: {job.Type}.")
+        };
+    }
+
+    private static async Task<int> ExecuteIoJobAsync(string payload)
+    {
+        var delayMilliseconds = ParseDelayMilliseconds(payload);
+        await Task.Delay(delayMilliseconds);
+        return delayMilliseconds;
+    }
+
+    private static int ParseDelayMilliseconds(string payload)
+    {
+        const string invalidPayloadMessage = "IO payload is invalid. Expected format: delay:<milliseconds>.";
+        const string payloadPrefix = "delay:";
+
+        if (string.IsNullOrWhiteSpace(payload) ||
+            !payload.StartsWith(payloadPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(invalidPayloadMessage);
+        }
+
+        var delayText = payload[payloadPrefix.Length..].Trim();
+        if (delayText.Length == 0)
+        {
+            throw new InvalidOperationException(invalidPayloadMessage);
+        }
+
+        var normalizedDelayText = delayText.Replace("_", string.Empty, StringComparison.Ordinal);
+        if (!int.TryParse(
+                normalizedDelayText,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var delayMilliseconds) ||
+            delayMilliseconds < 0)
+        {
+            throw new InvalidOperationException(invalidPayloadMessage);
+        }
+
+        return delayMilliseconds;
+    }
+
+    private async Task WorkerLoopAsync()
+    {
+        while (true)
+        {
+            await _queueSignal.WaitAsync();
+
+            if (!TryDequeueNext(out var queuedJob))
+            {
+                continue;
+            }
+
+            try
+            {
+                var result = await ExecuteJobAsync(queuedJob.Job);
+                queuedJob.CompletionSource.SetResult(result);
+            }
+            catch (Exception ex)
+            {
+                queuedJob.CompletionSource.SetException(ex);
+            }
         }
     }
 

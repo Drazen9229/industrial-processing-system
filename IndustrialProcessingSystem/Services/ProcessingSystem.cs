@@ -301,24 +301,41 @@ public class ProcessingSystem
     {
         cancellationToken.ThrowIfCancellationRequested();
         var (numbers, threads) = ParsePrimePayload(payload);
-        _ = threads; // TODO: Use threads to parallelize prime execution in a future step.
-
+        var ranges = BuildPrimeRanges(numbers, threads);
         var primeCount = 0;
-        for (var value = 2; value <= numbers; value++)
+        var parallelOptions = new ParallelOptions
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (IsPrime(value))
+            MaxDegreeOfParallelism = threads,
+            CancellationToken = cancellationToken
+        };
+
+        Parallel.ForEach(
+            ranges,
+            parallelOptions,
+            () => 0,
+            (range, _, localPrimeCount) =>
             {
-                primeCount++;
-            }
-        }
+                cancellationToken.ThrowIfCancellationRequested();
+
+                for (var value = range.Start; value <= range.End; value++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (IsPrime(value))
+                    {
+                        localPrimeCount++;
+                    }
+                }
+
+                return localPrimeCount;
+            },
+            localPrimeCount => Interlocked.Add(ref primeCount, localPrimeCount));
 
         return primeCount;
     }
 
     private static (int Numbers, int Threads) ParsePrimePayload(string payload)
     {
-        const string invalidPayloadMessage = "Prime payload is invalid. Expected format: numbers:<value>,threads:<value> with numbers > 1 and threads > 0.";
+        const string invalidPayloadMessage = "Prime payload is invalid. Expected format: numbers:<value>,threads:<value> with numbers > 1.";
 
         if (string.IsNullOrWhiteSpace(payload))
         {
@@ -343,7 +360,7 @@ public class ProcessingSystem
             }
 
             var valueText = keyValue[1].Replace("_", string.Empty, StringComparison.Ordinal);
-            if (!int.TryParse(valueText, NumberStyles.None, CultureInfo.InvariantCulture, out var value))
+            if (!int.TryParse(valueText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
             {
                 throw new InvalidOperationException(invalidPayloadMessage);
             }
@@ -373,12 +390,32 @@ public class ProcessingSystem
             throw new InvalidOperationException(invalidPayloadMessage);
         }
 
-        if (!numbers.HasValue || !threads.HasValue || numbers.Value <= 1 || threads.Value <= 0)
+        if (!numbers.HasValue || !threads.HasValue || numbers.Value <= 1)
         {
             throw new InvalidOperationException(invalidPayloadMessage);
         }
 
-        return (numbers.Value, threads.Value);
+        return (numbers.Value, Math.Clamp(threads.Value, 1, 8));
+    }
+
+    private static IReadOnlyList<(int Start, int End)> BuildPrimeRanges(int numbers, int threads)
+    {
+        var totalValues = numbers - 1; // Inclusive range [2, numbers]
+        var partitionCount = Math.Min(threads, totalValues);
+        var basePartitionSize = totalValues / partitionCount;
+        var remainder = totalValues % partitionCount;
+        var ranges = new List<(int Start, int End)>(partitionCount);
+
+        var start = 2;
+        for (var index = 0; index < partitionCount; index++)
+        {
+            var currentPartitionSize = basePartitionSize + (index < remainder ? 1 : 0);
+            var end = start + currentPartitionSize - 1;
+            ranges.Add((start, end));
+            start = end + 1;
+        }
+
+        return ranges;
     }
 
     private static bool IsPrime(int value)
@@ -410,11 +447,26 @@ public class ProcessingSystem
         return true;
     }
 
-    private static async Task<int> ExecuteIoJobAsync(string payload, CancellationToken cancellationToken)
+    private static Task<int> ExecuteIoJobAsync(string payload, CancellationToken cancellationToken)
     {
+        const int sleepChunkMilliseconds = 50;
+
         var delayMilliseconds = ParseDelayMilliseconds(payload);
-        await Task.Delay(delayMilliseconds, cancellationToken);
-        return delayMilliseconds;
+        var remainingDelayMilliseconds = delayMilliseconds;
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        while (remainingDelayMilliseconds > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var chunk = Math.Min(sleepChunkMilliseconds, remainingDelayMilliseconds);
+            Thread.Sleep(chunk);
+            remainingDelayMilliseconds -= chunk;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Random.Shared.Next(0, 101));
     }
 
     private static int ParseDelayMilliseconds(string payload)

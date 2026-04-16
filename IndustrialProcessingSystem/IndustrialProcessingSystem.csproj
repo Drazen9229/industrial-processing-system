@@ -11,4 +11,10 @@
       <Folder Include="Services\" />
     </ItemGroup>
 
+    <ItemGroup>
+      <None Update="Configuration\SystemConfig.xml">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+
 </Project>

@@ -15,6 +15,7 @@ public class ProcessingSystem
     private readonly int _maxQueueSize;
     private readonly List<QueuedJob> _queuedJobs = [];
     private readonly HashSet<Guid> _acceptedJobIds = [];
+    private readonly HashSet<Guid> _jobsInSystem = [];
     private readonly Dictionary<Guid, Job> _jobRegistry = [];
     private readonly List<Task> _workers = [];
     private readonly object _queueLock = new();
@@ -67,6 +68,7 @@ public class ProcessingSystem
                     throw new InvalidOperationException($"Duplicate job Id '{job.Id}' detected in InitialJobs.");
                 }
 
+                _jobsInSystem.Add(job.Id);
                 _jobRegistry[job.Id] = job;
                 var queuedJob = new QueuedJob(
                     job,
@@ -88,6 +90,17 @@ public class ProcessingSystem
             lock (_queueLock)
             {
                 return _queuedJobs.Count;
+            }
+        }
+    }
+
+    public int InSystemCount
+    {
+        get
+        {
+            lock (_queueLock)
+            {
+                return _jobsInSystem.Count;
             }
         }
     }
@@ -115,16 +128,18 @@ public class ProcessingSystem
         QueuedJob queuedJob;
         lock (_queueLock)
         {
-            if (!_acceptedJobIds.Add(job.Id))
+            if (_acceptedJobIds.Contains(job.Id))
             {
                 throw new InvalidOperationException($"Job with Id '{job.Id}' has already been accepted.");
             }
 
-            if (_queuedJobs.Count >= _maxQueueSize)
+            if (_jobsInSystem.Count >= _maxQueueSize)
             {
                 throw new InvalidOperationException("Queue is full. Cannot accept new jobs.");
             }
 
+            _acceptedJobIds.Add(job.Id);
+            _jobsInSystem.Add(job.Id);
             _jobRegistry[job.Id] = job;
             queuedJob = new QueuedJob(
                 job,
@@ -566,6 +581,18 @@ public class ProcessingSystem
                 RecordFailedJob(queuedJob.Job, ex.Message, stopwatch.ElapsedMilliseconds);
                 queuedJob.CompletionSource.TrySetException(ex);
             }
+            finally
+            {
+                RemoveFromSystem(queuedJob.Job.Id);
+            }
+        }
+    }
+
+    private void RemoveFromSystem(Guid jobId)
+    {
+        lock (_queueLock)
+        {
+            _jobsInSystem.Remove(jobId);
         }
     }
 
@@ -612,7 +639,7 @@ public class ProcessingSystem
     private void OnJobAttemptFailed(Job job, int attempt, Exception ex, bool isFinalAttempt)
     {
         _ = attempt;
-        if (isFinalAttempt && ex is TimeoutException)
+        if (isFinalAttempt)
         {
             OnJobAborted(job, ex);
             return;

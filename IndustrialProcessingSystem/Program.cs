@@ -17,11 +17,20 @@ class Program
             var processingSystem = new ProcessingSystem(config);
             var jobEventFileLogger = new JobEventFileLogger(Path.Combine("logs", "job-events.log"));
             jobEventFileLogger.Attach(processingSystem);
+            var reportsDirectory = Path.Combine("reports");
 
             processingSystem.JobCompleted += (job, result) =>
                 Console.WriteLine($"[EVENT] JobCompleted: Id={job.Id}, Type={job.Type}, Result={result}");
             processingSystem.JobFailed += (job, ex) =>
                 Console.WriteLine($"[EVENT] JobFailed: Id={job.Id}, Type={job.Type}, Error={ex.Message}");
+
+            var reportScheduler = new ProcessingReportScheduler(
+                processingSystem,
+                reportsDirectory,
+                TimeSpan.FromSeconds(1));
+            reportScheduler.Start();
+            Console.WriteLine($"Periodic XML reports directory: {Path.GetFullPath(reportsDirectory)}");
+
             processingSystem.Start();
 
             Console.WriteLine($"WorkerCount: {config.WorkerCount}");
@@ -71,12 +80,12 @@ class Program
             {
                 Console.WriteLine($"Failing demo IO job threw while awaiting result: {ex.Message}");
             }
+            
+            await Task.Delay(8000);
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Failed to load configuration: {ex.Message}");
         }
-        
-        await Task.Delay(8000);
     }
 }

@@ -29,6 +29,7 @@ public class JobEventFileLogger
 
         processingSystem.JobCompleted += OnJobCompleted;
         processingSystem.JobFailed += OnJobFailed;
+        processingSystem.JobAborted += OnJobAborted;
     }
 
     private void OnJobCompleted(Job job, int result)
@@ -40,6 +41,12 @@ public class JobEventFileLogger
     private void OnJobFailed(Job job, Exception ex)
     {
         var line = $"{DateTimeOffset.UtcNow:O} | FAILED | JobId={job.Id} | Type={job.Type} | Error={ex.Message}";
+        _ = AppendLineSafeAsync(line);
+    }
+
+    private void OnJobAborted(Job job, Exception ex)
+    {
+        var line = $"{DateTimeOffset.UtcNow:O} | ABORTED | JobId={job.Id} | Type={job.Type} | Error={ex.Message}";
         _ = AppendLineSafeAsync(line);
     }
 

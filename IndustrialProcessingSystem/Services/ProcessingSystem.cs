@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Globalization;
 using IndustrialProcessingSystem.Configuration;
 using IndustrialProcessingSystem.Enums;
 using IndustrialProcessingSystem.Models;
+using System.Xml.Linq;
 
 namespace IndustrialProcessingSystem.Services;
 
@@ -16,6 +18,9 @@ public class ProcessingSystem
     private readonly List<Task> _workers = [];
     private readonly object _queueLock = new();
     private readonly object _startLock = new();
+    private readonly object _statsLock = new();
+    private readonly List<CompletedJobStat> _completedJobs = [];
+    private readonly List<FailedJobStat> _failedJobs = [];
     private readonly SemaphoreSlim _queueSignal;
 
     public event Action<Job, int>? JobCompleted;
@@ -130,6 +135,61 @@ public class ProcessingSystem
             Id = job.Id,
             Result = queuedJob.CompletionSource.Task
         };
+    }
+
+    public void GenerateXmlReport(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            throw new ArgumentException("Report file path is required.", nameof(filePath));
+        }
+
+        var fullPath = Path.GetFullPath(filePath);
+        var directory = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        List<CompletedJobStat> completedSnapshot;
+        List<FailedJobStat> failedSnapshot;
+        lock (_statsLock)
+        {
+            completedSnapshot = [.. _completedJobs];
+            failedSnapshot = [.. _failedJobs];
+        }
+
+        var completedByType = completedSnapshot
+            .GroupBy(stat => stat.JobType)
+            .OrderBy(group => group.Key.ToString(), StringComparer.Ordinal)
+            .Select(group => new XElement(
+                "JobType",
+                new XAttribute("name", group.Key),
+                new XAttribute("count", group.Count()),
+                new XAttribute("averageDurationMs", Math.Round(group.Average(stat => stat.DurationMs)))));
+
+        var failedByType = failedSnapshot
+            .GroupBy(stat => stat.JobType)
+            .OrderBy(group => group.Key.ToString(), StringComparer.Ordinal)
+            .Select(group => new XElement(
+                "JobType",
+                new XAttribute("name", group.Key),
+                new XAttribute("count", group.Count()),
+                new XAttribute("averageDurationMs", Math.Round(group.Average(stat => stat.DurationMs)))));
+
+        var report = new XDocument(
+            new XElement(
+                "ProcessingReport",
+                new XAttribute("generatedAt", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)),
+                new XElement(
+                    "Summary",
+                    new XAttribute("totalCompleted", completedSnapshot.Count),
+                    new XAttribute("totalFailed", failedSnapshot.Count),
+                    new XAttribute("totalProcessed", completedSnapshot.Count + failedSnapshot.Count)),
+                new XElement("CompletedByType", completedByType),
+                new XElement("FailedByType", failedByType)));
+
+        report.Save(fullPath);
     }
 
     private static void ValidateJob(Job job)
@@ -399,17 +459,36 @@ public class ProcessingSystem
                 continue;
             }
 
+            var stopwatch = Stopwatch.StartNew();
             try
             {
                 var result = await ExecuteWithRetryAsync(queuedJob.Job);
+                RecordCompletedJob(queuedJob.Job, result, stopwatch.ElapsedMilliseconds);
                 queuedJob.CompletionSource.TrySetResult(result);
                 OnJobCompleted(queuedJob.Job, result);
             }
             catch (Exception ex)
             {
+                RecordFailedJob(queuedJob.Job, ex.Message, stopwatch.ElapsedMilliseconds);
                 queuedJob.CompletionSource.TrySetException(ex);
                 OnJobFailed(queuedJob.Job, ex);
             }
+        }
+    }
+
+    private void RecordCompletedJob(Job job, int result, long durationMs)
+    {
+        lock (_statsLock)
+        {
+            _completedJobs.Add(new CompletedJobStat(job.Id, job.Type, result, durationMs));
+        }
+    }
+
+    private void RecordFailedJob(Job job, string errorMessage, long durationMs)
+    {
+        lock (_statsLock)
+        {
+            _failedJobs.Add(new FailedJobStat(job.Id, job.Type, errorMessage, durationMs));
         }
     }
 
@@ -448,4 +527,7 @@ public class ProcessingSystem
         public Job Job { get; }
         public TaskCompletionSource<int> CompletionSource { get; }
     }
+
+    private sealed record CompletedJobStat(Guid JobId, JobType JobType, int Result, long DurationMs);
+    private sealed record FailedJobStat(Guid JobId, JobType JobType, string ErrorMessage, long DurationMs);
 }

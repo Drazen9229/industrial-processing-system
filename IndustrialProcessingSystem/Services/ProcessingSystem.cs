@@ -8,8 +8,9 @@ public class ProcessingSystem
 {
     private readonly int _workerCount;
     private readonly int _maxQueueSize;
-    private readonly List<Job> _queuedJobs = [];
+    private readonly List<QueuedJob> _queuedJobs = [];
     private readonly object _queueLock = new();
+    private readonly SemaphoreSlim _queueSignal;
 
     public ProcessingSystem(SystemConfig config)
     {
@@ -44,9 +45,14 @@ public class ProcessingSystem
             foreach (var job in config.InitialJobs)
             {
                 ValidateJob(job);
-                EnqueueByPriority(job);
+                var queuedJob = new QueuedJob(
+                    job,
+                    new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously));
+                EnqueueByPriority(queuedJob);
             }
         }
+
+        _queueSignal = new SemaphoreSlim(_queuedJobs.Count, int.MaxValue);
     }
 
     public int WorkerCount => _workerCount;
@@ -67,7 +73,9 @@ public class ProcessingSystem
     {
         ValidateJob(job);
 
-        TaskCompletionSource<int> resultSource;
+        var queuedJob = new QueuedJob(
+            job,
+            new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously));
         lock (_queueLock)
         {
             if (_queuedJobs.Count >= _maxQueueSize)
@@ -75,15 +83,15 @@ public class ProcessingSystem
                 throw new InvalidOperationException("Queue is full. Cannot accept new jobs.");
             }
 
-            EnqueueByPriority(job);
-            resultSource = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            EnqueueByPriority(queuedJob);
+            _queueSignal.Release();
         }
 
         // TODO: Complete this task when worker execution is implemented.
         return new JobHandle
         {
             Id = job.Id,
-            Result = resultSource.Task
+            Result = queuedJob.CompletionSource.Task
         };
     }
 
@@ -112,16 +120,45 @@ public class ProcessingSystem
         }
     }
 
-    private void EnqueueByPriority(Job job)
+    private void EnqueueByPriority(QueuedJob queuedJob)
     {
-        var insertIndex = _queuedJobs.FindIndex(existing => existing.Priority > job.Priority);
+        var insertIndex = _queuedJobs.FindIndex(existing => existing.Job.Priority > queuedJob.Job.Priority);
         if (insertIndex < 0)
         {
-            _queuedJobs.Add(job);
+            _queuedJobs.Add(queuedJob);
         }
         else
         {
-            _queuedJobs.Insert(insertIndex, job);
+            _queuedJobs.Insert(insertIndex, queuedJob);
         }
+    }
+
+    // Will be used by worker loops once execution is implemented.
+    private bool TryDequeueNext(out QueuedJob? queuedJob)
+    {
+        lock (_queueLock)
+        {
+            if (_queuedJobs.Count == 0)
+            {
+                queuedJob = null;
+                return false;
+            }
+
+            queuedJob = _queuedJobs[0];
+            _queuedJobs.RemoveAt(0);
+            return true;
+        }
+    }
+
+    private sealed class QueuedJob
+    {
+        public QueuedJob(Job job, TaskCompletionSource<int> completionSource)
+        {
+            Job = job;
+            CompletionSource = completionSource;
+        }
+
+        public Job Job { get; }
+        public TaskCompletionSource<int> CompletionSource { get; }
     }
 }

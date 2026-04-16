@@ -1,5 +1,6 @@
 ﻿using IndustrialProcessingSystem.Configuration;
 using IndustrialProcessingSystem.Enums;
+using IndustrialProcessingSystem.Infrastructure;
 using IndustrialProcessingSystem.Models;
 using IndustrialProcessingSystem.Services;
 
@@ -14,6 +15,8 @@ class Program
             var loader = new SystemConfigLoader();
             var config = loader.Load(Path.Combine("Configuration", "SystemConfig.xml"));
             var processingSystem = new ProcessingSystem(config);
+            var jobEventFileLogger = new JobEventFileLogger(Path.Combine("logs", "job-events.log"));
+            jobEventFileLogger.Attach(processingSystem);
 
             processingSystem.JobCompleted += (job, result) =>
                 Console.WriteLine($"[EVENT] JobCompleted: Id={job.Id}, Type={job.Type}, Result={result}");
@@ -73,5 +76,7 @@ class Program
         {
             Console.WriteLine($"Failed to load configuration: {ex.Message}");
         }
+        
+        await Task.Delay(8000);
     }
 }

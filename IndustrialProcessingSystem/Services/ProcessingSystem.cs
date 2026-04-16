@@ -12,6 +12,7 @@ public class ProcessingSystem
     private readonly List<QueuedJob> _queuedJobs = [];
     private readonly List<Task> _workers = [];
     private readonly object _queueLock = new();
+    private readonly object _startLock = new();
     private readonly SemaphoreSlim _queueSignal;
 
     public event Action<Job, int>? JobCompleted;
@@ -58,10 +59,6 @@ public class ProcessingSystem
         }
 
         _queueSignal = new SemaphoreSlim(_queuedJobs.Count, int.MaxValue);
-        for (var i = 0; i < _workerCount; i++)
-        {
-            _workers.Add(Task.Run(WorkerLoopAsync));
-        }
     }
 
     public int WorkerCount => _workerCount;
@@ -74,6 +71,22 @@ public class ProcessingSystem
             lock (_queueLock)
             {
                 return _queuedJobs.Count;
+            }
+        }
+    }
+
+    public void Start()
+    {
+        lock (_startLock)
+        {
+            if (_workers.Count > 0)
+            {
+                throw new InvalidOperationException("ProcessingSystem has already been started.");
+            }
+
+            for (var i = 0; i < _workerCount; i++)
+            {
+                _workers.Add(Task.Run(WorkerLoopAsync));
             }
         }
     }

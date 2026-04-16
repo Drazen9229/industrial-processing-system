@@ -15,6 +15,12 @@ class Program
             var config = loader.Load(Path.Combine("Configuration", "SystemConfig.xml"));
             var processingSystem = new ProcessingSystem(config);
 
+            processingSystem.JobCompleted += (job, result) =>
+                Console.WriteLine($"[EVENT] JobCompleted: Id={job.Id}, Type={job.Type}, Result={result}");
+            processingSystem.JobFailed += (job, ex) =>
+                Console.WriteLine($"[EVENT] JobFailed: Id={job.Id}, Type={job.Type}, Error={ex.Message}");
+            processingSystem.Start();
+
             Console.WriteLine($"WorkerCount: {config.WorkerCount}");
             Console.WriteLine($"MaxQueueSize: {config.MaxQueueSize}");
             Console.WriteLine($"InitialJobs: {config.InitialJobs.Count}");
@@ -42,6 +48,25 @@ class Program
             catch (Exception ex)
             {
                 Console.WriteLine($"Demo IO job failed: {ex.Message}");
+            }
+
+            var failingJob = new Job
+            {
+                Id = Guid.NewGuid(),
+                Type = JobType.IO,
+                Payload = "delay:abc",
+                Priority = 1
+            };
+
+            try
+            {
+                var failingHandle = processingSystem.Submit(failingJob);
+                var failingResult = await failingHandle.Result;
+                Console.WriteLine($"Failing demo job result (unexpected): {failingResult}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failing demo IO job threw while awaiting result: {ex.Message}");
             }
         }
         catch (Exception ex)

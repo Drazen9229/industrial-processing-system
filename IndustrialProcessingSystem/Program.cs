@@ -13,7 +13,8 @@ class Program
         try
         {
             var loader = new SystemConfigLoader();
-            var config = loader.Load(Path.Combine("Configuration", "SystemConfig.xml"));
+            var configPath = Path.Combine(AppContext.BaseDirectory, "Configuration", "SystemConfig.xml");
+            var config = loader.Load(configPath);
             var processingSystem = new ProcessingSystem(config);
             var jobEventFileLogger = new JobEventFileLogger(Path.Combine("logs", "job-events.log"));
             jobEventFileLogger.Attach(processingSystem);

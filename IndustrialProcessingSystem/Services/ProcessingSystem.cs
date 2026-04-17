@@ -369,13 +369,13 @@ public class ProcessingSystem : IAsyncDisposable, IDisposable
         }
     }
 
-    private bool TryDequeueNext(out QueuedJob? queuedJob)
+    private bool TryDequeueNext(out QueuedJob queuedJob)
     {
         lock (_queueLock)
         {
             if (_queuedJobs.Count == 0)
             {
-                queuedJob = null;
+                queuedJob = null!;
                 return false;
             }
 

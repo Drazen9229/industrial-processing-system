@@ -2,14 +2,17 @@ using IndustrialProcessingSystem.Services;
 
 namespace IndustrialProcessingSystem.Infrastructure;
 
-public class ProcessingReportScheduler
+public class ProcessingReportScheduler : IAsyncDisposable, IDisposable
 {
     private const int MaxReportFilesToKeep = 10;
     private readonly ProcessingSystem _processingSystem;
     private readonly string _reportsDirectory;
     private readonly TimeSpan _interval;
     private long _nextReportSlot;
-    private int _started;
+    private bool _started;
+    private CancellationTokenSource? _schedulerCts;
+    private Task? _runTask;
+    private readonly object _lifecycleLock = new();
 
     public ProcessingReportScheduler(ProcessingSystem processingSystem, string reportsDirectory, TimeSpan interval)
     {
@@ -35,20 +38,70 @@ public class ProcessingReportScheduler
 
     public void Start()
     {
-        if (Interlocked.Exchange(ref _started, 1) == 1)
+        lock (_lifecycleLock)
         {
-            return;
-        }
+            if (_started)
+            {
+                return;
+            }
 
-        _ = Task.Run(RunLoopSafeAsync);
+            _started = true;
+            _schedulerCts = new CancellationTokenSource();
+            _runTask = Task.Run(() => RunLoopSafeAsync(_schedulerCts.Token));
+        }
     }
 
-    private async Task RunLoopSafeAsync()
+    public async Task StopAsync()
+    {
+        Task? runTask;
+        CancellationTokenSource? schedulerCts;
+
+        lock (_lifecycleLock)
+        {
+            if (!_started)
+            {
+                return;
+            }
+
+            _started = false;
+            schedulerCts = _schedulerCts;
+            runTask = _runTask;
+            _schedulerCts = null;
+            _runTask = null;
+        }
+
+        schedulerCts?.Cancel();
+
+        if (runTask is not null)
+        {
+            try
+            {
+                await runTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        schedulerCts?.Dispose();
+    }
+
+    public void Dispose()
+    {
+        StopAsync().GetAwaiter().GetResult();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopAsync();
+    }
+
+    private async Task RunLoopSafeAsync(CancellationToken cancellationToken)
     {
         try
         {
             using var timer = new PeriodicTimer(_interval);
-            while (await timer.WaitForNextTickAsync())
+            while (await timer.WaitForNextTickAsync(cancellationToken))
             {
                 try
                 {
@@ -59,6 +112,9 @@ public class ProcessingReportScheduler
                     //intentionally swallow report failures
                 }
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch
         {

@@ -66,7 +66,7 @@ public class JobEventFileLogger
         }
         catch
         {
-            // Intentionally swallow logging failures for now.
+            //intentionally swallow logging failures
         }
     }
 

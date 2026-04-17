@@ -1,4 +1,4 @@
-﻿﻿using IndustrialProcessingSystem.Configuration;
+﻿using IndustrialProcessingSystem.Configuration;
 using IndustrialProcessingSystem.Enums;
 using IndustrialProcessingSystem.Infrastructure;
 using IndustrialProcessingSystem.Models;
@@ -42,35 +42,42 @@ class Program
 
             using var producerCts = new CancellationTokenSource();
             var stopSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            Console.CancelKeyPress += (_, eventArgs) =>
+            ConsoleCancelEventHandler onCancelKeyPress = (_, eventArgs) =>
             {
                 eventArgs.Cancel = true;
                 producerCts.Cancel();
                 stopSignal.TrySetResult();
             };
 
+            Console.CancelKeyPress += onCancelKeyPress;
+
             var producerTasks = Enumerable
                 .Range(1, config.WorkerCount)
                 .Select(producerId => Task.Run(() => ProducerLoopAsync(producerId, processingSystem, producerCts.Token)))
                 .ToArray();
 
-            Console.WriteLine($"Started {producerTasks.Length} producer task(s).");
-            Console.WriteLine("Press Enter or Ctrl+C to stop...");
-
-            var enterTask = Task.Run(() => Console.ReadLine());
-            var stopTask = await Task.WhenAny(enterTask, stopSignal.Task);
-            if (stopTask == enterTask)
+            try
             {
+                Console.WriteLine($"Started {producerTasks.Length} producer task(s).");
+                Console.WriteLine("Press Enter or Ctrl+C to stop...");
+
+                var enterTask = Task.Run(() => Console.ReadLine());
+                await Task.WhenAny(enterTask, stopSignal.Task);
+            }
+            finally
+            {
+                Console.CancelKeyPress -= onCancelKeyPress;
                 producerCts.Cancel();
+                await Task.WhenAll(producerTasks);
+                await reportScheduler.StopAsync();
+                await processingSystem.StopAsync();
             }
 
-            await Task.WhenAll(producerTasks);
             Console.WriteLine("Producers stopped. Exiting.");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to load configuration: {ex.Message}");
+            Console.WriteLine($"Failed: {ex.Message}");
         }
     }
 

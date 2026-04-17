@@ -135,7 +135,7 @@ public class ProcessingSystem
 
             if (_jobsInSystem.Count >= _maxQueueSize)
             {
-                throw new InvalidOperationException("Queue is full. Cannot accept new jobs.");
+                throw new InvalidOperationException("System capacity reached. Cannot accept new jobs.");
             }
 
             _acceptedJobIds.Add(job.Id);

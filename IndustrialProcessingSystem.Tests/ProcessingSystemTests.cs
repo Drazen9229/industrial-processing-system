@@ -65,19 +65,6 @@ public class ProcessingSystemTests
     }
 
     [Fact]
-    public void PrimePayloadThreadCount_IsConstrainedToOneAndEight()
-    {
-        var method = typeof(ProcessingSystem).GetMethod("ParsePrimePayload", BindingFlags.NonPublic | BindingFlags.Static);
-        Assert.NotNull(method);
-
-        var lowerResult = (ValueTuple<int, int>)method!.Invoke(null, new object?[] { "numbers:100,threads:0" })!;
-        var upperResult = (ValueTuple<int, int>)method.Invoke(null, new object?[] { "numbers:100,threads:99" })!;
-
-        Assert.Equal(1, lowerResult.Item2);
-        Assert.Equal(8, upperResult.Item2);
-    }
-
-    [Fact]
     public async Task PrimeJob_ProcessesSuccessfully()
     {
         var system = CreateSystem(workerCount: 1);

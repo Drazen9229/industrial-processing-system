@@ -7,7 +7,7 @@ using System.Xml.Linq;
 
 namespace IndustrialProcessingSystem.Services;
 
-public class ProcessingSystem
+public class ProcessingSystem : IAsyncDisposable, IDisposable
 {
     private const int MaxAttempts = 3;
     private static readonly TimeSpan JobTimeout = TimeSpan.FromSeconds(2);
@@ -24,6 +24,9 @@ public class ProcessingSystem
     private readonly List<CompletedJobStat> _completedJobs = [];
     private readonly List<FailedJobStat> _failedJobs = [];
     private readonly SemaphoreSlim _queueSignal;
+    private readonly CancellationTokenSource _shutdownCts = new();
+    private int _stopRequested;
+    private int _disposed;
 
     public event Action<Job, int>? JobCompleted;
     public event Action<Job, Exception>? JobFailed;
@@ -109,25 +112,38 @@ public class ProcessingSystem
     {
         lock (_startLock)
         {
+            ThrowIfDisposed();
+
             if (_workers.Count > 0)
             {
                 throw new InvalidOperationException("ProcessingSystem has already been started.");
             }
 
+            if (_shutdownCts.IsCancellationRequested)
+            {
+                throw new InvalidOperationException("ProcessingSystem is stopping or already stopped.");
+            }
+
             for (var i = 0; i < _workerCount; i++)
             {
-                _workers.Add(Task.Run(WorkerLoopAsync));
+                _workers.Add(Task.Run(() => WorkerLoopAsync(_shutdownCts.Token)));
             }
         }
     }
 
     public JobHandle Submit(Job job)
     {
+        ThrowIfDisposed();
         ValidateJob(job);
 
         QueuedJob queuedJob;
         lock (_queueLock)
         {
+            if (_shutdownCts.IsCancellationRequested)
+            {
+                throw new InvalidOperationException("ProcessingSystem is stopping. Cannot accept new jobs.");
+            }
+
             if (_acceptedJobIds.Contains(job.Id))
             {
                 throw new InvalidOperationException($"Job with Id '{job.Id}' has already been accepted.");
@@ -191,6 +207,8 @@ public class ProcessingSystem
 
     public void GenerateXmlReport(string filePath)
     {
+        ThrowIfDisposed();
+
         if (string.IsNullOrWhiteSpace(filePath))
         {
             throw new ArgumentException("Report file path is required.", nameof(filePath));
@@ -242,6 +260,75 @@ public class ProcessingSystem
                 new XElement("FailedByType", failedByType)));
 
         report.Save(fullPath);
+    }
+
+    public async Task StopAsync()
+    {
+        if (Interlocked.Exchange(ref _stopRequested, 1) == 0)
+        {
+            _shutdownCts.Cancel();
+            CancelQueuedJobs();
+        }
+
+        Task[] workersSnapshot;
+        lock (_startLock)
+        {
+            workersSnapshot = _workers.ToArray();
+        }
+
+        if (workersSnapshot.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.WhenAll(workersSnapshot);
+        }
+        catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
+        {
+        }
+    }
+
+    public void Stop()
+    {
+        StopAsync().GetAwaiter().GetResult();
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            Stop();
+        }
+        finally
+        {
+            _shutdownCts.Dispose();
+            _queueSignal.Dispose();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            await StopAsync();
+        }
+        finally
+        {
+            _shutdownCts.Dispose();
+            _queueSignal.Dispose();
+        }
     }
 
     private static void ValidateJob(Job job)
@@ -310,14 +397,15 @@ public class ProcessingSystem
         };
     }
 
-    private async Task<int> ExecuteJobWithTimeoutAsync(Job job)
+    private async Task<int> ExecuteJobWithTimeoutAsync(Job job, CancellationToken cancellationToken)
     {
         using var timeoutCts = new CancellationTokenSource(JobTimeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancellationToken);
         try
         {
-            return await ExecuteJobAsync(job, timeoutCts.Token);
+            return await ExecuteJobAsync(job, linkedCts.Token);
         }
-        catch (OperationCanceledException ex) when (timeoutCts.IsCancellationRequested)
+        catch (OperationCanceledException ex) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
             throw new TimeoutException(
                 $"Job '{job.Id}' exceeded timeout of {JobTimeout.TotalSeconds} seconds.",
@@ -325,16 +413,25 @@ public class ProcessingSystem
         }
     }
 
-    private async Task<int> ExecuteWithRetryAsync(Job job, Action<int, Exception, bool> onAttemptFailed)
+    private async Task<int> ExecuteWithRetryAsync(
+        Job job,
+        Action<int, Exception, bool> onAttemptFailed,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(onAttemptFailed);
         Exception? lastException = null;
 
         for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             try
             {
-                return await ExecuteJobWithTimeoutAsync(job);
+                return await ExecuteJobWithTimeoutAsync(job, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -455,7 +552,7 @@ public class ProcessingSystem
 
     private static IReadOnlyList<(int Start, int End)> BuildPrimeRanges(int numbers, int threads)
     {
-        var totalValues = numbers - 1; // Inclusive range [2, numbers]
+        var totalValues = numbers - 1;
         var partitionCount = Math.Min(threads, totalValues);
         var basePartitionSize = totalValues / partitionCount;
         var remainder = totalValues % partitionCount;
@@ -555,11 +652,43 @@ public class ProcessingSystem
         return delayMilliseconds;
     }
 
-    private async Task WorkerLoopAsync()
+    private void CancelQueuedJobs()
+    {
+        List<QueuedJob> queuedJobs;
+        lock (_queueLock)
+        {
+            queuedJobs = [.. _queuedJobs];
+            _queuedJobs.Clear();
+
+            foreach (var queuedJob in queuedJobs)
+            {
+                _jobsInSystem.Remove(queuedJob.Job.Id);
+            }
+        }
+
+        foreach (var queuedJob in queuedJobs)
+        {
+            queuedJob.CompletionSource.TrySetCanceled(_shutdownCts.Token);
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
+    }
+
+    private async Task WorkerLoopAsync(CancellationToken cancellationToken)
     {
         while (true)
         {
-            await _queueSignal.WaitAsync();
+            try
+            {
+                await _queueSignal.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
 
             if (!TryDequeueNext(out var queuedJob))
             {
@@ -571,10 +700,16 @@ public class ProcessingSystem
             {
                 var result = await ExecuteWithRetryAsync(
                     queuedJob.Job,
-                    (attempt, ex, isFinalAttempt) => OnJobAttemptFailed(queuedJob.Job, attempt, ex, isFinalAttempt));
+                    (attempt, ex, isFinalAttempt) => OnJobAttemptFailed(queuedJob.Job, attempt, ex, isFinalAttempt),
+                    cancellationToken);
                 RecordCompletedJob(queuedJob.Job, result, stopwatch.ElapsedMilliseconds);
                 queuedJob.CompletionSource.TrySetResult(result);
                 OnJobCompleted(queuedJob.Job, result);
+            }
+            catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
+            {
+                queuedJob.CompletionSource.TrySetCanceled(cancellationToken);
+                OnJobAborted(queuedJob.Job, ex);
             }
             catch (Exception ex)
             {
@@ -620,7 +755,7 @@ public class ProcessingSystem
         }
         catch
         {
-            //intentionally swallow exceptions to keep workers running.
+            //intentionally swallow exceptions to keep workers running
         }
     }
 
@@ -632,7 +767,7 @@ public class ProcessingSystem
         }
         catch
         {
-            //intentionally swallow exceptions to keep workers running.
+            //intentionally swallow exceptions to keep workers running
         }
     }
 
@@ -656,7 +791,7 @@ public class ProcessingSystem
         }
         catch
         {
-            //intentionally swallow exceptions to keep workers running.
+            //intentionally swallow exceptions to keep workers running
         }
     }
 

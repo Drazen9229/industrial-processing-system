@@ -1,4 +1,4 @@
-﻿using IndustrialProcessingSystem.Configuration;
+﻿﻿using IndustrialProcessingSystem.Configuration;
 using IndustrialProcessingSystem.Enums;
 using IndustrialProcessingSystem.Infrastructure;
 using IndustrialProcessingSystem.Models;
@@ -23,6 +23,8 @@ class Program
                 Console.WriteLine($"[EVENT] JobCompleted: Id={job.Id}, Type={job.Type}, Result={result}");
             processingSystem.JobFailed += (job, ex) =>
                 Console.WriteLine($"[EVENT] JobFailed: Id={job.Id}, Type={job.Type}, Error={ex.Message}");
+            processingSystem.JobAborted += (job, ex) =>
+                Console.WriteLine($"[EVENT] JobAborted: Id={job.Id}, Type={job.Type}, Error={ex.Message}");
 
             var reportScheduler = new ProcessingReportScheduler(
                 processingSystem,
